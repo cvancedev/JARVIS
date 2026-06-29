@@ -1,8 +1,56 @@
+"use client";
+
+import { useState } from "react";
+import ChatWindow from "@/components/ChatWindow";
+import PromptInput from "@/components/PromptInput";
+import { Message } from "@/types/message";
+
 export default function Home() {
+  const [input, setInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [messages, setMessages] = useState<Message[]>([
+    {
+      id: "1",
+      role: "assistant",
+      content: "Welcome back, Curt. Awaiting instructions.",
+    },
+  ]);
+
+  const handleSend = async () => {
+  const trimmedInput = input.trim();
+
+  if (!trimmedInput || isLoading) return;
+
+  setIsLoading(true);
+
+  const userMessage: Message = {
+    id: crypto.randomUUID(),
+    role: "user",
+    content: trimmedInput,
+  };
+
+  setMessages((prev) => [...prev, userMessage]);
+
+  setInput("");
+
+  // Fake thinking delay
+  setTimeout(() => {
+    const assistantMessage: Message = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content: "Command received. AI connection coming next.",
+    };
+
+    setMessages((prev) => [...prev, assistantMessage]);
+
+    setIsLoading(false);
+  }, 700);
+};
+
   return (
-    <main className="min-h-screen bg-zinc-950 text-white flex flex-col">
+    <main className="min-h-screen bg-zinc-950 text-white">
       <header className="border-b border-zinc-800 p-5">
-        <div className="max-w-5xl mx-auto flex items-center justify-between">
+        <div className="mx-auto flex max-w-5xl items-center justify-between">
           <div>
             <h1 className="text-3xl font-bold">JARVIS</h1>
             <p className="text-sm text-zinc-400">
@@ -11,34 +59,30 @@ export default function Home() {
           </div>
 
           <div className="flex items-center gap-2">
-            <div className="h-3 w-3 rounded-full bg-green-500 animate-pulse"></div>
+            <div className="h-3 w-3 animate-pulse rounded-full bg-green-500" />
             <span className="text-sm text-zinc-400">ONLINE</span>
           </div>
         </div>
       </header>
 
-      <section className="flex-1 flex items-center justify-center">
-        <div className="max-w-3xl w-full px-6">
-          <h2 className="text-4xl font-bold mb-4">
-            Good Afternoon, Curt.
-          </h2>
-
-          <p className="text-zinc-400 text-lg mb-10">
+      <section className="mx-auto flex max-w-5xl flex-col px-6 py-10">
+        <div className="mb-8">
+          <h2 className="text-4xl font-bold">Good Afternoon, Curt.</h2>
+          <p className="mt-3 text-zinc-400">
             Awaiting your instructions...
           </p>
-
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-            <input
-              type="text"
-              placeholder="Type a command..."
-              className="w-full bg-transparent outline-none text-lg placeholder:text-zinc-500"
-            />
-          </div>
-
-          <button className="mt-6 rounded-lg bg-blue-600 px-6 py-3 font-semibold hover:bg-blue-500 transition">
-            Send
-          </button>
         </div>
+
+        <div className="min-h-[420px] rounded-xl border border-zinc-800 bg-zinc-900/40 p-6">
+          <ChatWindow messages={messages} />
+        </div>
+
+        <PromptInput
+          value={input}
+          onChange={setInput}
+          onSend={handleSend}
+          isLoading={isLoading}
+        />
       </section>
     </main>
   );
