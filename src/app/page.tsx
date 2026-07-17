@@ -1,51 +1,26 @@
 "use client";
 
-import { useState } from "react";
 import ChatWindow from "@/components/ChatWindow";
 import PromptInput from "@/components/PromptInput";
-import { Message } from "@/types/message";
+import { useChat } from "@/hooks/useChat";
 
 export default function Home() {
-  const [input, setInput] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: "1",
-      role: "assistant",
-      content: "Welcome back, Curt. Awaiting instructions.",
-    },
-  ]);
+  const {
+    input,
+    setInput,
+    isLoading,
+    isThinking,
+    messages,
+    error,
+    handleSend,
+    clearConversation,
+  } = useChat();
 
-  const handleSend = async () => {
-  const trimmedInput = input.trim();
-
-  if (!trimmedInput || isLoading) return;
-
-  setIsLoading(true);
-
-  const userMessage: Message = {
-    id: crypto.randomUUID(),
-    role: "user",
-    content: trimmedInput,
+  const handleClearConversation = () => {
+    if (window.confirm("Clear this conversation?")) {
+      clearConversation();
+    }
   };
-
-  setMessages((prev) => [...prev, userMessage]);
-
-  setInput("");
-
-  // Fake thinking delay
-  setTimeout(() => {
-    const assistantMessage: Message = {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      content: "Command received. AI connection coming next.",
-    };
-
-    setMessages((prev) => [...prev, assistantMessage]);
-
-    setIsLoading(false);
-  }, 700);
-};
 
   return (
     <main className="min-h-screen bg-zinc-950 text-white">
@@ -58,9 +33,19 @@ export default function Home() {
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
-            <div className="h-3 w-3 animate-pulse rounded-full bg-green-500" />
-            <span className="text-sm text-zinc-400">ONLINE</span>
+          <div className="flex items-center gap-4">
+            <button
+              type="button"
+              className="text-sm text-zinc-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={handleClearConversation}
+              disabled={isLoading}
+            >
+              Clear
+            </button>
+            <div className="flex items-center gap-2">
+              <div className="h-3 w-3 animate-pulse rounded-full bg-green-500" />
+              <span className="text-sm text-zinc-400">ONLINE</span>
+            </div>
           </div>
         </div>
       </header>
@@ -74,7 +59,7 @@ export default function Home() {
         </div>
 
         <div className="min-h-[420px] rounded-xl border border-zinc-800 bg-zinc-900/40 p-6">
-          <ChatWindow messages={messages} />
+          <ChatWindow messages={messages} isLoading={isThinking} />
         </div>
 
         <PromptInput
@@ -83,6 +68,9 @@ export default function Home() {
           onSend={handleSend}
           isLoading={isLoading}
         />
+        {error ? (
+          <p className="mt-3 text-sm text-red-400" role="alert">{error}</p>
+        ) : null}
       </section>
     </main>
   );
