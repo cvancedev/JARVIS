@@ -13,3 +13,14 @@ export interface OutlookMessage {
   isRead: boolean;
   preview: string;
 }
+
+export interface OutlookMessageDetail {
+  id: string;
+  senderName: string;
+  senderEmail: string;
+  recipients: string[];
+  subject: string;
+  receivedAt: string;
+  body: string;
+  bodyContentType: "text" | "html";
+}
