@@ -3,9 +3,12 @@ import OpenAI from "openai";
 export const runtime = "nodejs";
 
 const MODEL = "gpt-5.6";
+const MAX_MEMORY_COUNT = 100;
+const MAX_MEMORY_LENGTH = 1_000;
+const MAX_TOTAL_MEMORY_LENGTH = 10_000;
 
 type ChatMessage = {
-  role: "user" | "assistant";
+  role: "developer" | "user" | "assistant";
   content: string;
 };
 
@@ -87,11 +90,74 @@ export async function POST(request: Request) {
     messages.push({ role: message.role, content: message.content });
   }
 
+  const memoryContents: string[] = [];
+
+  if (body.memories !== undefined) {
+    if (!Array.isArray(body.memories)) {
+      return errorResponse(
+        "Invalid memories.",
+        400,
+        "The memories field must be an array when provided.",
+      );
+    }
+
+    if (body.memories.length > MAX_MEMORY_COUNT) {
+      return errorResponse(
+        "Memory payload too large.",
+        413,
+        `At most ${MAX_MEMORY_COUNT} memories may be sent.`,
+      );
+    }
+
+    for (const memory of body.memories) {
+      if (!isRecord(memory) || typeof memory.content !== "string") continue;
+
+      const content = memory.content.replace(/\s+/g, " ").trim();
+      if (!content) continue;
+
+      if (content.length > MAX_MEMORY_LENGTH) {
+        return errorResponse(
+          "Memory payload too large.",
+          413,
+          `Each memory must be at most ${MAX_MEMORY_LENGTH} characters.`,
+        );
+      }
+
+      memoryContents.push(content);
+    }
+
+    const totalMemoryLength = memoryContents.reduce(
+      (total, content) => total + content.length,
+      0,
+    );
+
+    if (totalMemoryLength > MAX_TOTAL_MEMORY_LENGTH) {
+      return errorResponse(
+        "Memory payload too large.",
+        413,
+        `Combined memory content must be at most ${MAX_TOTAL_MEMORY_LENGTH} characters.`,
+      );
+    }
+  }
+
+  const memoryContext = memoryContents.length
+    ? [
+        "Saved user facts and preferences:",
+        ...memoryContents.map((content) => `- ${content}`),
+        "",
+        "Use these details only when relevant. Do not mention that they came from localStorage or force unrelated memories into an answer. Current user instructions always take priority.",
+      ].join("\n")
+    : null;
+
+  const input: ChatMessage[] = memoryContext
+    ? [{ role: "developer", content: memoryContext }, ...messages]
+    : messages;
+
   try {
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const responseStream = await openai.responses.create({
       model: MODEL,
-      input: messages,
+      input,
       stream: true,
     });
 
