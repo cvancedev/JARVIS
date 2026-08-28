@@ -439,6 +439,7 @@ export function useChat(memories: Memory[] = []) {
         body: JSON.stringify({
           messages: nextMessages.map(({ role, content }) => ({ role, content })),
           memories: memories.map(({ content }) => ({ content })),
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         }),
       });
 

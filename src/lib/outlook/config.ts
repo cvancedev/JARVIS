@@ -1,5 +1,7 @@
 const GRAPH_SCOPE = "https://graph.microsoft.com/Mail.Read";
 const GRAPH_SEND_SCOPE = "https://graph.microsoft.com/Mail.Send";
+const GRAPH_CALENDAR_READ_SCOPE =
+  "https://graph.microsoft.com/Calendars.Read";
 
 function requiredEnvironmentVariable(name: string) {
   const value = process.env[name]?.trim();
@@ -20,6 +22,11 @@ export function getOutlookConfig() {
     sessionSecret,
     authorizeUrl: `https://login.microsoftonline.com/${encodeURIComponent(tenantId)}/oauth2/v2.0/authorize`,
     tokenUrl: `https://login.microsoftonline.com/${encodeURIComponent(tenantId)}/oauth2/v2.0/token`,
-    scopes: ["offline_access", GRAPH_SCOPE, GRAPH_SEND_SCOPE],
+    scopes: [
+      "offline_access",
+      GRAPH_SCOPE,
+      GRAPH_SEND_SCOPE,
+      GRAPH_CALENDAR_READ_SCOPE,
+    ],
   };
 }

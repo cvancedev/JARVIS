@@ -1,4 +1,9 @@
 import type { OutlookMessage, OutlookMessageDetail } from "@/types/outlook";
+import type {
+  CalendarAttendee,
+  CalendarEvent,
+  CalendarParticipant,
+} from "@/types/calendar";
 
 export class OutlookGraphError extends Error {
   constructor(
@@ -7,7 +12,7 @@ export class OutlookGraphError extends Error {
     public readonly graphErrorMessage: string,
     public readonly requestId: string | null,
   ) {
-    super("Microsoft Graph inbox request failed.");
+    super("Microsoft Graph request failed.");
     this.name = "OutlookGraphError";
   }
 }
@@ -51,7 +56,7 @@ async function createGraphError(response: Response) {
       ? sanitizedString(requestIdValue, "", 200) || null
       : null;
 
-  console.error("Microsoft Graph inbox request failed.", {
+  console.error("Microsoft Graph request failed.", {
     upstreamStatus: response.status,
     graphErrorCode,
     graphErrorMessage,
@@ -64,6 +69,127 @@ async function createGraphError(response: Response) {
     graphErrorMessage,
     requestId,
   );
+}
+
+function calendarParticipant(value: unknown): CalendarParticipant {
+  if (typeof value !== "object" || value === null) {
+    return { name: "", email: "" };
+  }
+  const participant = value as Record<string, unknown>;
+  const emailAddress = participant.emailAddress;
+  if (typeof emailAddress !== "object" || emailAddress === null) {
+    return { name: "", email: "" };
+  }
+  const address = emailAddress as Record<string, unknown>;
+  return {
+    name: typeof address.name === "string" ? address.name : "",
+    email: typeof address.address === "string" ? address.address : "",
+  };
+}
+
+function calendarAttendee(value: unknown): CalendarAttendee | null {
+  if (typeof value !== "object" || value === null) return null;
+  const attendee = value as Record<string, unknown>;
+  const participant = calendarParticipant(attendee);
+  const type = attendee.type;
+  const status = attendee.status;
+  const response = typeof status === "object" && status !== null
+    ? (status as Record<string, unknown>).response
+    : null;
+  return {
+    ...participant,
+    type: type === "optional" || type === "resource" ? type : "required",
+    response: typeof response === "string" ? response : "none",
+  };
+}
+
+export async function getUpcomingCalendarEvents(
+  accessToken: string,
+): Promise<CalendarEvent[]> {
+  const start = new Date();
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 30);
+  return getCalendarEvents(accessToken, start, end, 20);
+}
+
+export async function getCalendarEvents(
+  accessToken: string,
+  start: Date,
+  end: Date,
+  limit = 50,
+): Promise<CalendarEvent[]> {
+  const query = new URLSearchParams({
+    startDateTime: start.toISOString(),
+    endDateTime: end.toISOString(),
+    "$top": String(Math.min(Math.max(limit, 1), 50)),
+    "$select": "id,subject,start,end,location,organizer,attendees,isAllDay",
+    "$orderby": "start/dateTime",
+  });
+  const response = await fetch(
+    `https://graph.microsoft.com/v1.0/me/calendar/calendarView?${query}`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Prefer: 'outlook.timezone="UTC"',
+      },
+      cache: "no-store",
+    },
+  );
+  if (!response.ok) throw await createGraphError(response);
+
+  const body: unknown = await response.json();
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    !("value" in body) ||
+    !Array.isArray(body.value)
+  ) {
+    throw new Error("Invalid Microsoft Graph calendar response.");
+  }
+
+  return body.value.flatMap((value): CalendarEvent[] => {
+    if (typeof value !== "object" || value === null) return [];
+    const event = value as Record<string, unknown>;
+    const startValue = event.start;
+    const endValue = event.end;
+    if (
+      typeof event.id !== "string" ||
+      typeof event.subject !== "string" ||
+      typeof event.isAllDay !== "boolean" ||
+      typeof startValue !== "object" ||
+      startValue === null ||
+      typeof endValue !== "object" ||
+      endValue === null
+    ) return [];
+    const eventStart = startValue as Record<string, unknown>;
+    const eventEnd = endValue as Record<string, unknown>;
+    if (
+      typeof eventStart.dateTime !== "string" ||
+      typeof eventStart.timeZone !== "string" ||
+      typeof eventEnd.dateTime !== "string" ||
+      typeof eventEnd.timeZone !== "string"
+    ) return [];
+    const location = event.location;
+    const locationName = typeof location === "object" && location !== null
+      ? (location as Record<string, unknown>).displayName
+      : null;
+
+    return [{
+      id: event.id,
+      subject: event.subject || "(No subject)",
+      start: { dateTime: eventStart.dateTime, timeZone: eventStart.timeZone },
+      end: { dateTime: eventEnd.dateTime, timeZone: eventEnd.timeZone },
+      location: typeof locationName === "string" ? locationName : "",
+      organizer: calendarParticipant(event.organizer),
+      attendees: Array.isArray(event.attendees)
+        ? event.attendees.flatMap((attendee) => {
+            const parsed = calendarAttendee(attendee);
+            return parsed ? [parsed] : [];
+          }).slice(0, 100)
+        : [],
+      isAllDay: event.isAllDay,
+    }];
+  });
 }
 
 function decodeHtmlEntities(value: string) {
