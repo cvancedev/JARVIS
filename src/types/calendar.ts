@@ -25,3 +25,10 @@ export interface CalendarEvent {
   isCancelled: boolean;
   showAs: string;
 }
+
+export interface CalendarEventDetail extends CalendarEvent {
+  description: string;
+  eventType: "singleInstance" | "occurrence" | "exception" | "seriesMaster";
+  seriesMasterId: string;
+  etag: string;
+}

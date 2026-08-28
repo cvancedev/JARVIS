@@ -3,7 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 import type { Conversation } from "@/types/conversation";
 import type {
+  CalendarEventCancellationProposal,
   CalendarEventProposal,
+  CalendarEventSnapshot,
+  CalendarEventUpdateProposal,
   CalendarProposalConflict,
 } from "@/types/calendarProposal";
 import type { Memory } from "@/types/memory";
@@ -17,6 +20,8 @@ const THINKING_MESSAGE = "Thinking...";
 const DEFAULT_TITLE = "New Conversation";
 const MAX_TITLE_LENGTH = 48;
 const CALENDAR_PROPOSAL_CONTROL = "\n\u001eJARVIS_CALENDAR_PROPOSAL:";
+const CALENDAR_UPDATE_CONTROL = "\n\u001eJARVIS_CALENDAR_UPDATE_PROPOSAL:";
+const CALENDAR_CANCELLATION_CONTROL = "\n\u001eJARVIS_CALENDAR_CANCELLATION_PROPOSAL:";
 const INITIAL_MESSAGES: Message[] = [
   {
     id: "1",
@@ -82,6 +87,43 @@ function isCalendarEventProposal(value: unknown): value is CalendarEventProposal
     typeof proposal.description === "string" &&
     Array.isArray(proposal.conflicts) &&
     proposal.conflicts.every(isCalendarProposalConflict);
+}
+
+function isCalendarEventSnapshot(value: unknown): value is CalendarEventSnapshot {
+  if (typeof value !== "object" || value === null) return false;
+  const snapshot = value as Record<string, unknown>;
+  return typeof snapshot.id === "string" && typeof snapshot.subject === "string" &&
+    typeof snapshot.start === "string" && typeof snapshot.end === "string" &&
+    typeof snapshot.timeZone === "string" && typeof snapshot.location === "string" &&
+    Array.isArray(snapshot.attendeeEmails) &&
+    snapshot.attendeeEmails.every((email) => typeof email === "string") &&
+    typeof snapshot.description === "string" && typeof snapshot.organizerName === "string" &&
+    typeof snapshot.organizerEmail === "string" && typeof snapshot.etag === "string";
+}
+
+function isCalendarEventUpdateProposal(value: unknown): value is CalendarEventUpdateProposal {
+  if (typeof value !== "object" || value === null) return false;
+  const proposal = value as Record<string, unknown>;
+  const proposed = proposal.proposed;
+  return typeof proposal.id === "string" && isCalendarEventSnapshot(proposal.original) &&
+    typeof proposed === "object" && proposed !== null &&
+    typeof (proposed as Record<string, unknown>).subject === "string" &&
+    typeof (proposed as Record<string, unknown>).start === "string" &&
+    typeof (proposed as Record<string, unknown>).end === "string" &&
+    typeof (proposed as Record<string, unknown>).timeZone === "string" &&
+    typeof (proposed as Record<string, unknown>).location === "string" &&
+    Array.isArray((proposed as Record<string, unknown>).attendeeEmails) &&
+    ((proposed as Record<string, unknown>).attendeeEmails as unknown[]).every((email) => typeof email === "string") &&
+    typeof (proposed as Record<string, unknown>).description === "string" &&
+    Array.isArray(proposal.conflicts) && proposal.conflicts.every(isCalendarProposalConflict);
+}
+
+function isCalendarEventCancellationProposal(
+  value: unknown,
+): value is CalendarEventCancellationProposal {
+  return typeof value === "object" && value !== null &&
+    typeof (value as Record<string, unknown>).id === "string" &&
+    isCalendarEventSnapshot((value as Record<string, unknown>).original);
 }
 
 function parseStoredArray(
@@ -239,8 +281,18 @@ export function useChat(memories: Memory[] = []) {
     conversationId: string;
     proposal: CalendarEventProposal;
   } | null>(null);
+  const [calendarUpdateState, setCalendarUpdateState] = useState<{
+    conversationId: string;
+    proposal: CalendarEventUpdateProposal;
+  } | null>(null);
+  const [calendarCancellationState, setCalendarCancellationState] = useState<{
+    conversationId: string;
+    proposal: CalendarEventCancellationProposal;
+  } | null>(null);
   const [isCreatingCalendarEvent, setIsCreatingCalendarEvent] = useState(false);
+  const [isChangingCalendarEvent, setIsChangingCalendarEvent] = useState(false);
   const [calendarCreationError, setCalendarCreationError] = useState<string | null>(null);
+  const [calendarChangeError, setCalendarChangeError] = useState<string | null>(null);
   const [calendarCreationSuccess, setCalendarCreationSuccess] = useState<string | null>(null);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(
     null,
@@ -248,6 +300,7 @@ export function useChat(memories: Memory[] = []) {
   const requestActiveRef = useRef(false);
   const activeStreamingMessageIdRef = useRef<string | null>(null);
   const calendarCreationActiveRef = useRef(false);
+  const calendarChangeActiveRef = useRef(false);
 
   const activeConversation = conversations.find(
     (conversation) => conversation.id === activeConversationId,
@@ -260,6 +313,14 @@ export function useChat(memories: Memory[] = []) {
   const pendingCalendarProposal =
     calendarProposalState?.conversationId === activeConversationId
       ? calendarProposalState.proposal
+      : null;
+  const pendingCalendarUpdate =
+    calendarUpdateState?.conversationId === activeConversationId
+      ? calendarUpdateState.proposal
+      : null;
+  const pendingCalendarCancellation =
+    calendarCancellationState?.conversationId === activeConversationId
+      ? calendarCancellationState.proposal
       : null;
 
   const persistConversationState = (
@@ -424,7 +485,14 @@ export function useChat(memories: Memory[] = []) {
     setCalendarProposalState((previous) =>
       previous?.conversationId === requestConversationId ? null : previous,
     );
+    setCalendarUpdateState((previous) =>
+      previous?.conversationId === requestConversationId ? null : previous,
+    );
+    setCalendarCancellationState((previous) =>
+      previous?.conversationId === requestConversationId ? null : previous,
+    );
     setCalendarCreationError(null);
+    setCalendarChangeError(null);
     setCalendarCreationSuccess(null);
 
     const userMessage: Message = {
@@ -515,7 +583,13 @@ export function useChat(memories: Memory[] = []) {
       let assistantText = "";
       let responseBuffer = "";
       let proposalPayload = "";
-      let readingProposal = false;
+      let proposalKind: "create" | "update" | "cancel" | null = null;
+      const controls = [
+        { marker: CALENDAR_PROPOSAL_CONTROL, kind: "create" as const },
+        { marker: CALENDAR_UPDATE_CONTROL, kind: "update" as const },
+        { marker: CALENDAR_CANCELLATION_CONTROL, kind: "cancel" as const },
+      ];
+      const longestControl = Math.max(...controls.map(({ marker }) => marker.length));
 
       const appendChunk = (chunk: string) => {
         if (!chunk) return;
@@ -531,24 +605,25 @@ export function useChat(memories: Memory[] = []) {
       };
 
       const processResponseChunk = (chunk: string, isFinal = false) => {
-        if (readingProposal) {
+        if (proposalKind) {
           proposalPayload += chunk;
           return;
         }
         responseBuffer += chunk;
-        const controlIndex = responseBuffer.indexOf(CALENDAR_PROPOSAL_CONTROL);
-        if (controlIndex >= 0) {
-          appendChunk(responseBuffer.slice(0, controlIndex));
-          proposalPayload = responseBuffer.slice(
-            controlIndex + CALENDAR_PROPOSAL_CONTROL.length,
-          );
+        const control = controls
+          .map((entry) => ({ ...entry, index: responseBuffer.indexOf(entry.marker) }))
+          .filter((entry) => entry.index >= 0)
+          .sort((a, b) => a.index - b.index)[0];
+        if (control) {
+          appendChunk(responseBuffer.slice(0, control.index));
+          proposalPayload = responseBuffer.slice(control.index + control.marker.length);
           responseBuffer = "";
-          readingProposal = true;
+          proposalKind = control.kind;
           return;
         }
         const safeLength = isFinal
           ? responseBuffer.length
-          : Math.max(0, responseBuffer.length - CALENDAR_PROPOSAL_CONTROL.length + 1);
+          : Math.max(0, responseBuffer.length - longestControl + 1);
         appendChunk(responseBuffer.slice(0, safeLength));
         responseBuffer = responseBuffer.slice(safeLength);
       };
@@ -564,14 +639,18 @@ export function useChat(memories: Memory[] = []) {
         processResponseChunk(decoder.decode(value, { stream: true }));
       }
 
-      if (readingProposal && proposalPayload) {
+      if (proposalKind && proposalPayload) {
         try {
           const proposal: unknown = JSON.parse(proposalPayload);
-          if (isCalendarEventProposal(proposal)) {
+          if (proposalKind === "create" && isCalendarEventProposal(proposal)) {
             setCalendarProposalState({
               conversationId: requestConversationId,
               proposal,
             });
+          } else if (proposalKind === "update" && isCalendarEventUpdateProposal(proposal)) {
+            setCalendarUpdateState({ conversationId: requestConversationId, proposal });
+          } else if (proposalKind === "cancel" && isCalendarEventCancellationProposal(proposal)) {
+            setCalendarCancellationState({ conversationId: requestConversationId, proposal });
           }
         } catch {
           // Ignore malformed control data without affecting the chat response.
@@ -598,7 +677,7 @@ export function useChat(memories: Memory[] = []) {
   };
 
   const clearConversation = () => {
-    if (requestActiveRef.current || calendarCreationActiveRef.current || !activeConversation) return;
+    if (requestActiveRef.current || calendarCreationActiveRef.current || calendarChangeActiveRef.current || !activeConversation) return;
 
     setConversationMessages(activeConversation.id, []);
     setMemorySuggestions((previous) =>
@@ -610,12 +689,18 @@ export function useChat(memories: Memory[] = []) {
     setCalendarProposalState((previous) =>
       previous?.conversationId === activeConversation.id ? null : previous,
     );
+    setCalendarUpdateState((previous) =>
+      previous?.conversationId === activeConversation.id ? null : previous,
+    );
+    setCalendarCancellationState((previous) =>
+      previous?.conversationId === activeConversation.id ? null : previous,
+    );
     setCalendarCreationError(null);
     setCalendarCreationSuccess(null);
   };
 
   const createNewConversation = () => {
-    if (requestActiveRef.current || calendarCreationActiveRef.current) return;
+    if (requestActiveRef.current || calendarCreationActiveRef.current || calendarChangeActiveRef.current) return;
 
     const conversation = createConversation([]);
     const nextConversations = [conversation, ...conversations];
@@ -632,6 +717,7 @@ export function useChat(memories: Memory[] = []) {
     if (
       requestActiveRef.current ||
       calendarCreationActiveRef.current ||
+      calendarChangeActiveRef.current ||
       id === activeConversationId ||
       !conversations.some((conversation) => conversation.id === id)
     ) {
@@ -656,6 +742,7 @@ export function useChat(memories: Memory[] = []) {
     if (
       requestActiveRef.current ||
       calendarCreationActiveRef.current ||
+      calendarChangeActiveRef.current ||
       !trimmedTitle ||
       !conversations.some((conversation) => conversation.id === id) ||
       !activeConversationId
@@ -681,6 +768,7 @@ export function useChat(memories: Memory[] = []) {
     if (
       requestActiveRef.current ||
       calendarCreationActiveRef.current ||
+      calendarChangeActiveRef.current ||
       !conversations.some((conversation) => conversation.id === id)
     ) {
       return;
@@ -710,6 +798,8 @@ export function useChat(memories: Memory[] = []) {
     setCalendarProposalState((previous) =>
       previous?.conversationId === id ? null : previous,
     );
+    setCalendarUpdateState((previous) => previous?.conversationId === id ? null : previous);
+    setCalendarCancellationState((previous) => previous?.conversationId === id ? null : previous);
     setActiveConversationId(nextActiveConversationId);
     setError(null);
     persistConversationState(nextConversations, nextActiveConversationId);
@@ -722,13 +812,13 @@ export function useChat(memories: Memory[] = []) {
   };
 
   const cancelCalendarProposal = () => {
-    if (calendarCreationActiveRef.current) return;
+    if (calendarCreationActiveRef.current || calendarChangeActiveRef.current) return;
     setCalendarProposalState(null);
     setCalendarCreationError(null);
   };
 
   const createCalendarEvent = async () => {
-    if (!pendingCalendarProposal || calendarCreationActiveRef.current) return;
+    if (!pendingCalendarProposal || calendarCreationActiveRef.current || calendarChangeActiveRef.current) return;
     calendarCreationActiveRef.current = true;
     setIsCreatingCalendarEvent(true);
     setCalendarCreationError(null);
@@ -778,6 +868,92 @@ export function useChat(memories: Memory[] = []) {
     }
   };
 
+  const dismissCalendarChange = () => {
+    if (calendarChangeActiveRef.current) return;
+    setCalendarUpdateState(null);
+    setCalendarCancellationState(null);
+    setCalendarChangeError(null);
+  };
+
+  const updateCalendarEvent = async () => {
+    if (!pendingCalendarUpdate || calendarChangeActiveRef.current || calendarCreationActiveRef.current) return;
+    calendarChangeActiveRef.current = true;
+    setIsChangingCalendarEvent(true);
+    setCalendarChangeError(null);
+    setCalendarCreationSuccess(null);
+    try {
+      const response = await fetch("/api/calendar/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ proposal: pendingCalendarUpdate }),
+      });
+      const body: unknown = await response.json();
+      if (
+        response.status === 409 && typeof body === "object" && body !== null &&
+        "code" in body && body.code === "calendar_conflicts_changed" &&
+        "conflicts" in body && Array.isArray(body.conflicts) &&
+        body.conflicts.every(isCalendarProposalConflict)
+      ) {
+        setCalendarUpdateState((previous) => previous ? {
+          ...previous,
+          proposal: { ...previous.proposal, conflicts: body.conflicts as CalendarProposalConflict[] },
+        } : previous);
+        setCalendarChangeError(
+          "Your calendar conflicts changed. Review them, then click Update Event again if you still want to proceed.",
+        );
+        return;
+      }
+      if (!response.ok) {
+        const stale = typeof body === "object" && body !== null && "code" in body &&
+          body.code === "calendar_event_changed";
+        throw new Error(stale ? "stale" : "update");
+      }
+      setCalendarUpdateState(null);
+      setCalendarCreationSuccess("Calendar event updated successfully.");
+    } catch (changeError: unknown) {
+      setCalendarChangeError(
+        changeError instanceof Error && changeError.message === "stale"
+          ? "The event changed or disappeared after review. Ask JARVIS to prepare a fresh update."
+          : "The calendar event could not be updated. Your proposal was preserved.",
+      );
+    } finally {
+      calendarChangeActiveRef.current = false;
+      setIsChangingCalendarEvent(false);
+    }
+  };
+
+  const cancelCalendarEvent = async () => {
+    if (!pendingCalendarCancellation || calendarChangeActiveRef.current || calendarCreationActiveRef.current) return;
+    calendarChangeActiveRef.current = true;
+    setIsChangingCalendarEvent(true);
+    setCalendarChangeError(null);
+    setCalendarCreationSuccess(null);
+    try {
+      const response = await fetch("/api/calendar/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ proposal: pendingCalendarCancellation }),
+      });
+      const body: unknown = await response.json();
+      if (!response.ok) {
+        const stale = typeof body === "object" && body !== null && "code" in body &&
+          body.code === "calendar_event_changed";
+        throw new Error(stale ? "stale" : "cancel");
+      }
+      setCalendarCancellationState(null);
+      setCalendarCreationSuccess("Calendar event cancelled successfully.");
+    } catch (changeError: unknown) {
+      setCalendarChangeError(
+        changeError instanceof Error && changeError.message === "stale"
+          ? "The event changed or disappeared after review. Ask JARVIS to prepare a fresh cancellation."
+          : "The calendar event could not be cancelled. Your proposal was preserved.",
+      );
+    } finally {
+      calendarChangeActiveRef.current = false;
+      setIsChangingCalendarEvent(false);
+    }
+  };
+
   return {
     input,
     setInput,
@@ -801,5 +977,12 @@ export function useChat(memories: Memory[] = []) {
     calendarCreationSuccess,
     createCalendarEvent,
     cancelCalendarProposal,
+    pendingCalendarUpdate,
+    pendingCalendarCancellation,
+    isChangingCalendarEvent,
+    calendarChangeError,
+    updateCalendarEvent,
+    cancelCalendarEvent,
+    dismissCalendarChange,
   };
 }

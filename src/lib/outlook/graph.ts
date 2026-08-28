@@ -2,9 +2,13 @@ import type { OutlookMessage, OutlookMessageDetail } from "@/types/outlook";
 import type {
   CalendarAttendee,
   CalendarEvent,
+  CalendarEventDetail,
   CalendarParticipant,
 } from "@/types/calendar";
-import type { CalendarEventProposal } from "@/types/calendarProposal";
+import type {
+  CalendarEventProposal,
+  CalendarEventUpdateProposal,
+} from "@/types/calendarProposal";
 
 export class OutlookGraphError extends Error {
   constructor(
@@ -240,6 +244,146 @@ export async function createCalendarEvent(
     throw new Error("Invalid Microsoft Graph event creation response.");
   }
   return { id };
+}
+
+export async function getCalendarEvent(
+  accessToken: string,
+  eventId: string,
+): Promise<CalendarEventDetail> {
+  const query = new URLSearchParams({
+    "$select": "id,subject,start,end,location,organizer,attendees,isAllDay,isCancelled,showAs,body,type,seriesMasterId",
+  });
+  const response = await fetch(
+    `https://graph.microsoft.com/v1.0/me/events/${encodeURIComponent(eventId)}?${query}`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Prefer: 'outlook.timezone="UTC", outlook.body-content-type="text"',
+      },
+      cache: "no-store",
+    },
+  );
+  if (!response.ok) throw await createGraphError(response);
+
+  const value: unknown = await response.json();
+  if (typeof value !== "object" || value === null) {
+    throw new Error("Invalid Microsoft Graph event response.");
+  }
+  const event = value as Record<string, unknown>;
+  const start = event.start as Record<string, unknown> | undefined;
+  const end = event.end as Record<string, unknown> | undefined;
+  const body = event.body as Record<string, unknown> | undefined;
+  const location = event.location as Record<string, unknown> | undefined;
+  const eventType = event.type;
+  const etag = event["@odata.etag"];
+  if (
+    typeof event.id !== "string" ||
+    typeof event.subject !== "string" ||
+    typeof start?.dateTime !== "string" ||
+    typeof start.timeZone !== "string" ||
+    typeof end?.dateTime !== "string" ||
+    typeof end.timeZone !== "string" ||
+    typeof event.isAllDay !== "boolean" ||
+    typeof etag !== "string" ||
+    !["singleInstance", "occurrence", "exception", "seriesMaster"].includes(
+      typeof eventType === "string" ? eventType : "",
+    )
+  ) {
+    throw new Error("Invalid Microsoft Graph event response.");
+  }
+
+  return {
+    id: event.id,
+    subject: event.subject || "(No subject)",
+    start: { dateTime: start.dateTime, timeZone: start.timeZone },
+    end: { dateTime: end.dateTime, timeZone: end.timeZone },
+    location: typeof location?.displayName === "string" ? location.displayName : "",
+    organizer: calendarParticipant(event.organizer),
+    attendees: Array.isArray(event.attendees)
+      ? event.attendees.flatMap((attendee) => {
+          const parsed = calendarAttendee(attendee);
+          return parsed ? [parsed] : [];
+        }).slice(0, 100)
+      : [],
+    isAllDay: event.isAllDay,
+    isCancelled: event.isCancelled === true,
+    showAs: typeof event.showAs === "string" ? event.showAs : "busy",
+    description: typeof body?.content === "string"
+      ? readableBody(body.content, typeof body.contentType === "string" ? body.contentType : "text")
+      : "",
+    eventType: eventType as CalendarEventDetail["eventType"],
+    seriesMasterId: typeof event.seriesMasterId === "string" ? event.seriesMasterId : "",
+    etag,
+  };
+}
+
+export async function updateCalendarEvent(
+  accessToken: string,
+  eventId: string,
+  etag: string,
+  proposal: CalendarEventUpdateProposal,
+) {
+  const { original, proposed } = proposal;
+  const graphUpdate: Record<string, unknown> = {};
+  if (proposed.subject !== original.subject) graphUpdate.subject = proposed.subject;
+  if (proposed.start !== original.start || proposed.end !== original.end) {
+    const start = new Date(proposed.start);
+    const end = new Date(proposed.end);
+    graphUpdate.start = { dateTime: start.toISOString().replace(/Z$/, ""), timeZone: "UTC" };
+    graphUpdate.end = { dateTime: end.toISOString().replace(/Z$/, ""), timeZone: "UTC" };
+  }
+  if (proposed.location !== original.location) {
+    graphUpdate.location = { displayName: proposed.location };
+  }
+  if (proposed.description !== original.description) {
+    graphUpdate.body = { contentType: "text", content: proposed.description };
+  }
+  if (JSON.stringify([...proposed.attendeeEmails].sort()) !==
+      JSON.stringify([...original.attendeeEmails].sort())) {
+    graphUpdate.attendees = proposed.attendeeEmails.map((address) => ({
+      emailAddress: { address },
+      type: "required",
+    }));
+  }
+  const response = await fetch(
+    `https://graph.microsoft.com/v1.0/me/events/${encodeURIComponent(eventId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        "If-Match": etag,
+      },
+      body: JSON.stringify(graphUpdate),
+      cache: "no-store",
+    },
+  );
+  if (!response.ok) throw await createGraphError(response);
+  if (response.status !== 200) {
+    throw new Error("Unexpected Microsoft Graph event update response.");
+  }
+}
+
+export async function cancelCalendarEvent(
+  accessToken: string,
+  eventId: string,
+  etag: string,
+) {
+  const response = await fetch(
+    `https://graph.microsoft.com/v1.0/me/events/${encodeURIComponent(eventId)}`,
+    {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "If-Match": etag,
+      },
+      cache: "no-store",
+    },
+  );
+  if (!response.ok) throw await createGraphError(response);
+  if (response.status !== 204) {
+    throw new Error("Unexpected Microsoft Graph event cancellation response.");
+  }
 }
 
 function decodeHtmlEntities(value: string) {
