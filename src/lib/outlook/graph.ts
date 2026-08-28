@@ -4,6 +4,7 @@ import type {
   CalendarEvent,
   CalendarParticipant,
 } from "@/types/calendar";
+import type { CalendarEventProposal } from "@/types/calendarProposal";
 
 export class OutlookGraphError extends Error {
   constructor(
@@ -192,6 +193,53 @@ export async function getCalendarEvents(
       showAs: typeof event.showAs === "string" ? event.showAs : "busy",
     }];
   });
+}
+
+export async function createCalendarEvent(
+  accessToken: string,
+  proposal: CalendarEventProposal,
+) {
+  const start = new Date(proposal.start);
+  const end = new Date(proposal.end);
+  const response = await fetch(
+    "https://graph.microsoft.com/v1.0/me/calendar/events",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        subject: proposal.subject,
+        start: { dateTime: start.toISOString().replace(/Z$/, ""), timeZone: "UTC" },
+        end: { dateTime: end.toISOString().replace(/Z$/, ""), timeZone: "UTC" },
+        location: proposal.location ? { displayName: proposal.location } : undefined,
+        attendees: proposal.attendeeEmails.map((address) => ({
+          emailAddress: { address },
+          type: "required",
+        })),
+        body: proposal.description
+          ? { contentType: "text", content: proposal.description }
+          : undefined,
+        transactionId: proposal.id,
+      }),
+      cache: "no-store",
+    },
+  );
+  if (!response.ok) throw await createGraphError(response);
+  if (response.status !== 201) {
+    throw new Error("Unexpected Microsoft Graph event creation response.");
+  }
+
+  const body: unknown = await response.json();
+  if (typeof body !== "object" || body === null || !("id" in body)) {
+    throw new Error("Invalid Microsoft Graph event creation response.");
+  }
+  const id = (body as Record<string, unknown>).id;
+  if (typeof id !== "string" || !id) {
+    throw new Error("Invalid Microsoft Graph event creation response.");
+  }
+  return { id };
 }
 
 function decodeHtmlEntities(value: string) {

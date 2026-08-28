@@ -1,6 +1,7 @@
 "use client";
 
 import ChatWindow from "@/components/ChatWindow";
+import CalendarProposalCard from "@/components/CalendarProposalCard";
 import PromptInput from "@/components/PromptInput";
 import Sidebar from "@/components/Sidebar";
 import { useChat } from "@/hooks/useChat";
@@ -25,6 +26,12 @@ export default function Home() {
     deleteConversation,
     pendingMemorySuggestion,
     dismissMemorySuggestion,
+    pendingCalendarProposal,
+    isCreatingCalendarEvent,
+    calendarCreationError,
+    calendarCreationSuccess,
+    createCalendarEvent,
+    cancelCalendarProposal,
   } = useChat(memories);
 
   const handleClearConversation = () => {
@@ -125,11 +132,27 @@ export default function Home() {
             </div>
           ) : null}
 
+          {pendingCalendarProposal ? (
+            <CalendarProposalCard
+              proposal={pendingCalendarProposal}
+              isCreating={isCreatingCalendarEvent}
+              error={calendarCreationError}
+              onCreate={() => void createCalendarEvent()}
+              onCancel={cancelCalendarProposal}
+            />
+          ) : null}
+
+          {calendarCreationSuccess ? (
+            <p className="mt-3 rounded-lg border border-emerald-900 bg-emerald-950/30 px-4 py-3 text-sm text-emerald-300">
+              {calendarCreationSuccess}
+            </p>
+          ) : null}
+
           <PromptInput
             value={input}
             onChange={setInput}
             onSend={handleSend}
-            isLoading={isLoading}
+            isLoading={isLoading || isCreatingCalendarEvent}
           />
           {error ? (
             <p className="mt-3 text-sm text-red-400" role="alert">{error}</p>

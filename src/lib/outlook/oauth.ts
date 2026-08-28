@@ -1,20 +1,67 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { NextResponse } from "next/server";
-import { getOutlookConfig } from "@/lib/outlook/config";
+import {
+  getOutlookConfig,
+  normalizedDelegatedScopes,
+  outlookScopeVersion,
+} from "@/lib/outlook/config";
 import { readAccessSession, readRefreshToken, setTokenCookies } from "@/lib/outlook/session";
 
-interface TokenResponse {
+interface RawTokenResponse {
   access_token: string;
   expires_in: number;
   refresh_token?: string;
+  scope?: string;
 }
 
-function isTokenResponse(value: unknown): value is TokenResponse {
+export class OutlookScopeError extends Error {
+  constructor(public readonly missingScopes: string[]) {
+    super("Microsoft access token is missing required delegated scopes.");
+    this.name = "OutlookScopeError";
+  }
+}
+
+function tokenClaimScopes(accessToken: string) {
+  try {
+    const payload = accessToken.split(".")[1];
+    if (!payload) return [];
+    const decoded: unknown = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (typeof decoded !== "object" || decoded === null) return [];
+    const scope = (decoded as Record<string, unknown>).scp;
+    return typeof scope === "string"
+      ? scope.split(/\s+/).filter(Boolean).map((value) => value.toLowerCase()).sort()
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function grantedScopes(token: Pick<RawTokenResponse, "access_token" | "scope">) {
+  const responseScopes = token.scope
+    ? token.scope.split(/\s+/).filter(Boolean).map((value) =>
+        value.slice(value.lastIndexOf("/") + 1).toLowerCase())
+    : [];
+  return [...new Set([...responseScopes, ...tokenClaimScopes(token.access_token)])].sort();
+}
+
+function missingRequiredScopes(granted: string[], requested: string[]) {
+  const grantedSet = new Set(granted.map((scope) => scope.toLowerCase()));
+  return normalizedDelegatedScopes(requested).filter((scope) => !grantedSet.has(scope));
+}
+
+export function delegatedScopeStatus(scopes: string[]) {
+  return {
+    calendarsReadWrite: scopes.includes("calendars.readwrite"),
+  };
+}
+
+function isTokenResponse(value: unknown): value is RawTokenResponse {
   if (typeof value !== "object" || value === null) return false;
   const token = value as Record<string, unknown>;
   return typeof token.access_token === "string" &&
     typeof token.expires_in === "number" &&
-    (token.refresh_token === undefined || typeof token.refresh_token === "string");
+    (token.refresh_token === undefined || typeof token.refresh_token === "string") &&
+    (token.scope === undefined || typeof token.scope === "string");
 }
 
 async function requestToken(parameters: URLSearchParams) {
@@ -27,7 +74,15 @@ async function requestToken(parameters: URLSearchParams) {
   if (!response.ok) throw new Error("Microsoft token exchange failed.");
   const body: unknown = await response.json();
   if (!isTokenResponse(body)) throw new Error("Invalid Microsoft token response.");
-  return body;
+  const config = getOutlookConfig();
+  const resolvedScopes = grantedScopes(body);
+  const missingScopes = missingRequiredScopes(resolvedScopes, config.scopes);
+  if (missingScopes.length) throw new OutlookScopeError(missingScopes);
+  return {
+    ...body,
+    grantedScopes: resolvedScopes,
+    scopeVersion: outlookScopeVersion(config.scopes),
+  };
 }
 
 export function createAuthorizationRequest() {
@@ -68,13 +123,24 @@ export async function exchangeAuthorizationCode(code: string, verifier: string) 
   }));
 }
 
-export async function getValidAccessToken(response: NextResponse) {
+export async function getValidAccessTokenDetails(response: NextResponse) {
+  const config = getOutlookConfig();
+  const currentScopeVersion = outlookScopeVersion(config.scopes);
   const accessSession = await readAccessSession();
-  if (accessSession && accessSession.expiresAt > Date.now()) return accessSession.token;
+  if (
+    accessSession &&
+    accessSession.expiresAt > Date.now() &&
+    accessSession.scopeVersion === currentScopeVersion &&
+    missingRequiredScopes(accessSession.grantedScopes, config.scopes).length === 0
+  ) {
+    return {
+      accessToken: accessSession.token,
+      grantedScopes: accessSession.grantedScopes,
+    };
+  }
 
   const refreshToken = await readRefreshToken();
   if (!refreshToken) return null;
-  const config = getOutlookConfig();
   const token = await requestToken(new URLSearchParams({
     client_id: config.clientId,
     client_secret: config.clientSecret,
@@ -82,6 +148,20 @@ export async function getValidAccessToken(response: NextResponse) {
     refresh_token: refreshToken,
     scope: config.scopes.join(" "),
   }));
-  setTokenCookies(response, token.access_token, token.expires_in, token.refresh_token);
-  return token.access_token;
+  setTokenCookies(
+    response,
+    token.access_token,
+    token.expires_in,
+    token.grantedScopes,
+    token.scopeVersion,
+    token.refresh_token,
+  );
+  return {
+    accessToken: token.access_token,
+    grantedScopes: token.grantedScopes,
+  };
+}
+
+export async function getValidAccessToken(response: NextResponse) {
+  return (await getValidAccessTokenDetails(response))?.accessToken ?? null;
 }

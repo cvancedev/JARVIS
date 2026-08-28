@@ -34,7 +34,14 @@ export async function GET(request: NextRequest) {
     const token = await exchangeAuthorizationCode(code, verifier);
     const response = redirect("connected");
     clearOAuthCookies(response);
-    setTokenCookies(response, token.access_token, token.expires_in, token.refresh_token);
+    setTokenCookies(
+      response,
+      token.access_token,
+      token.expires_in,
+      token.grantedScopes,
+      token.scopeVersion,
+      token.refresh_token,
+    );
     return response;
   } catch {
     const response = redirect("authentication_error");

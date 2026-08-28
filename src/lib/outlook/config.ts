@@ -1,7 +1,7 @@
 const GRAPH_SCOPE = "https://graph.microsoft.com/Mail.Read";
 const GRAPH_SEND_SCOPE = "https://graph.microsoft.com/Mail.Send";
-const GRAPH_CALENDAR_READ_SCOPE =
-  "https://graph.microsoft.com/Calendars.Read";
+const GRAPH_CALENDAR_SCOPE =
+  "https://graph.microsoft.com/Calendars.ReadWrite";
 
 function requiredEnvironmentVariable(name: string) {
   const value = process.env[name]?.trim();
@@ -26,7 +26,18 @@ export function getOutlookConfig() {
       "offline_access",
       GRAPH_SCOPE,
       GRAPH_SEND_SCOPE,
-      GRAPH_CALENDAR_READ_SCOPE,
+      GRAPH_CALENDAR_SCOPE,
     ],
   };
+}
+
+export function normalizedDelegatedScopes(scopes: string[]) {
+  return scopes
+    .filter((scope) => scope !== "offline_access")
+    .map((scope) => scope.slice(scope.lastIndexOf("/") + 1).toLowerCase())
+    .sort();
+}
+
+export function outlookScopeVersion(scopes: string[]) {
+  return normalizedDelegatedScopes(scopes).join("|");
 }

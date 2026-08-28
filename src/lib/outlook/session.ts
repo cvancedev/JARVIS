@@ -8,7 +8,12 @@ export const OUTLOOK_REFRESH_COOKIE = "jarvis_outlook_refresh";
 export const OUTLOOK_STATE_COOKIE = "jarvis_outlook_state";
 export const OUTLOOK_VERIFIER_COOKIE = "jarvis_outlook_verifier";
 
-interface AccessSession { token: string; expiresAt: number }
+interface AccessSession {
+  token: string;
+  expiresAt: number;
+  grantedScopes: string[];
+  scopeVersion: string;
+}
 
 function encryptionKey() {
   return createHash("sha256").update(getOutlookConfig().sessionSecret).digest();
@@ -63,11 +68,15 @@ export function setTokenCookies(
   response: NextResponse,
   accessToken: string,
   expiresIn: number,
+  grantedScopes: string[],
+  scopeVersion: string,
   refreshToken?: string,
 ) {
   const accessSession: AccessSession = {
     token: accessToken,
     expiresAt: Date.now() + Math.max(expiresIn - 60, 60) * 1_000,
+    grantedScopes,
+    scopeVersion,
   };
   response.cookies.set(
     OUTLOOK_ACCESS_COOKIE,
@@ -95,8 +104,17 @@ export async function readAccessSession() {
     const parsed: unknown = JSON.parse(decrypted);
     if (typeof parsed !== "object" || parsed === null) return null;
     const session = parsed as Record<string, unknown>;
-    return typeof session.token === "string" && typeof session.expiresAt === "number"
-      ? ({ token: session.token, expiresAt: session.expiresAt } satisfies AccessSession)
+    return typeof session.token === "string" &&
+      typeof session.expiresAt === "number" &&
+      Array.isArray(session.grantedScopes) &&
+      session.grantedScopes.every((scope) => typeof scope === "string") &&
+      typeof session.scopeVersion === "string"
+      ? ({
+          token: session.token,
+          expiresAt: session.expiresAt,
+          grantedScopes: session.grantedScopes,
+          scopeVersion: session.scopeVersion,
+        } satisfies AccessSession)
       : null;
   } catch {
     return null;

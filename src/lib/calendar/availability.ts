@@ -1,4 +1,4 @@
-import type { CalendarEvent } from "@/types/calendar";
+import type { CalendarDateTime, CalendarEvent } from "@/types/calendar";
 
 export interface AvailabilityWindow {
   start: Date;
@@ -10,15 +10,15 @@ interface BusyInterval {
   end: number;
 }
 
-function eventInstant(dateTime: string, timeZone: string) {
-  const milliseconds = dateTime.replace(/\.(\d{3})\d+/, ".$1");
+export function calendarDateTimeInstant(value: CalendarDateTime) {
+  const milliseconds = value.dateTime.replace(/\.(\d{3})\d+/, ".$1");
   const hasOffset = /(?:Z|[+-]\d{2}:\d{2})$/i.test(milliseconds);
-  const value = Date.parse(
-    timeZone.toUpperCase() === "UTC" && !hasOffset
+  const instant = Date.parse(
+    value.timeZone.toUpperCase() === "UTC" && !hasOffset
       ? `${milliseconds}Z`
       : milliseconds,
   );
-  return Number.isFinite(value) ? value : null;
+  return Number.isFinite(instant) ? instant : null;
 }
 
 function eventMetadata(event: CalendarEvent) {
@@ -44,8 +44,8 @@ export function calculateAvailability(
     const windowEnd = window.end.getTime();
     const conflicts = events.flatMap((event) => {
       if (event.isCancelled || event.showAs.toLowerCase() === "free") return [];
-      const start = eventInstant(event.start.dateTime, event.start.timeZone);
-      const end = eventInstant(event.end.dateTime, event.end.timeZone);
+      const start = calendarDateTimeInstant(event.start);
+      const end = calendarDateTimeInstant(event.end);
       if (start === null || end === null || end <= windowStart || start >= windowEnd) {
         return [];
       }

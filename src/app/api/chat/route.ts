@@ -1,7 +1,9 @@
 import OpenAI from "openai";
+import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import {
   calculateAvailability,
+  calendarDateTimeInstant,
   type AvailabilityWindow,
 } from "@/lib/calendar/availability";
 import {
@@ -11,6 +13,10 @@ import {
   searchOutlookMessages,
 } from "@/lib/outlook/graph";
 import { getValidAccessToken } from "@/lib/outlook/oauth";
+import type {
+  CalendarEventProposal,
+  CalendarProposalConflict,
+} from "@/types/calendarProposal";
 
 export const runtime = "nodejs";
 
@@ -25,6 +31,12 @@ const MAX_CALENDAR_QUERY_DAYS = 90;
 const MAX_CALENDAR_SEARCH_LENGTH = 200;
 const MAX_AVAILABILITY_DAYS = 14;
 const MAX_FREE_WINDOW_MINUTES = 24 * 60;
+const MAX_EVENT_SUBJECT_LENGTH = 200;
+const MAX_EVENT_LOCATION_LENGTH = 500;
+const MAX_EVENT_DESCRIPTION_LENGTH = 2_000;
+const MAX_EVENT_ATTENDEES = 20;
+const CALENDAR_PROPOSAL_CONTROL = "\n\u001eJARVIS_CALENDAR_PROPOSAL:";
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const DAYPARTS = {
   morning: { start: "06:00", end: "12:00" },
@@ -166,6 +178,47 @@ const MICROSOFT_READ_TOOLS: OpenAI.Responses.FunctionTool[] = [
     },
     strict: true,
   },
+  {
+    type: "function",
+    name: "prepare_calendar_event",
+    description:
+      "Prepare and conflict-check a single non-recurring calendar event for explicit UI review. This never creates an event.",
+    parameters: {
+      type: "object",
+      properties: {
+        subject: { type: "string", description: "Event title." },
+        startDate: { type: "string", description: "Local start date, YYYY-MM-DD." },
+        startTime: { type: "string", description: "Local start time, HH:mm." },
+        endDate: { type: "string", description: "Local end date, YYYY-MM-DD." },
+        endTime: { type: "string", description: "Local end time, HH:mm." },
+        location: {
+          type: "string",
+          description: "Explicitly requested location, or an empty string.",
+        },
+        attendeeEmails: {
+          type: "array",
+          items: { type: "string" },
+          description: "Only email addresses explicitly supplied by the user.",
+        },
+        description: {
+          type: "string",
+          description: "Explicitly requested short description, or an empty string.",
+        },
+      },
+      required: [
+        "subject",
+        "startDate",
+        "startTime",
+        "endDate",
+        "endTime",
+        "location",
+        "attendeeEmails",
+        "description",
+      ],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
 ];
 
 const OUTLOOK_GUIDANCE = [
@@ -188,6 +241,9 @@ const CALENDAR_GUIDANCE = [
   `Use these exact daypart definitions: morning ${DAYPARTS.morning.start}-${DAYPARTS.morning.end}, afternoon ${DAYPARTS.afternoon.start}-${DAYPARTS.afternoon.end}, and evening ${DAYPARTS.evening.start}-${DAYPARTS.evening.end}.`,
   "For an open-ended availability question without a time range or daypart, ask which portion of the day to check instead of inventing working hours.",
   "For scheduling requests, you may discuss availability but must not claim to create or modify an event.",
+  "When the user requests a sufficiently specified single event, use prepare_calendar_event only to prepare it for the separate review UI. Never say it was created.",
+  "Never invent an attendee email address. If the user names someone without explicitly providing an email address, leave attendeeEmails empty and clearly tell the user that person will not be invited unless an email is provided.",
+  "Words such as okay, sure, sounds good, or looks fine are never authorization to create an event. Only the separate Create Event UI action can create it.",
 ].join(" ");
 
 type MicrosoftToolCall = OpenAI.Responses.ResponseFunctionToolCall;
@@ -316,6 +372,97 @@ function calendarMetadata(event: Awaited<ReturnType<typeof getCalendarEvents>>[n
     isAllDay: event.isAllDay,
     showAs: event.showAs,
   };
+}
+
+function proposalConflicts(
+  conflicts: ReturnType<typeof calculateAvailability>[number]["conflicts"],
+): CalendarProposalConflict[] {
+  return conflicts.flatMap((event): CalendarProposalConflict[] => {
+    const start = calendarDateTimeInstant(event.start);
+    const end = calendarDateTimeInstant(event.end);
+    if (start === null || end === null) return [];
+    return [{
+      id: event.id,
+      subject: event.subject,
+      start: new Date(start).toISOString(),
+      end: new Date(end).toISOString(),
+      isAllDay: event.isAllDay,
+    }];
+  });
+}
+
+async function prepareCalendarEvent(
+  args: Record<string, unknown>,
+  accessToken: string | null,
+  timeZone: string,
+) {
+  if (!accessToken) {
+    return {
+      output: toolResult({ connected: false, error: "Microsoft is not connected." }),
+      proposal: null,
+    };
+  }
+  const subject = typeof args.subject === "string" ? args.subject.trim() : "";
+  const startDate = typeof args.startDate === "string" ? args.startDate : "";
+  const startTime = typeof args.startTime === "string" ? args.startTime : "";
+  const endDate = typeof args.endDate === "string" ? args.endDate : "";
+  const endTime = typeof args.endTime === "string" ? args.endTime : "";
+  const location = typeof args.location === "string" ? args.location.trim() : "";
+  const description = typeof args.description === "string" ? args.description.trim() : "";
+  const attendeeEmails = Array.isArray(args.attendeeEmails)
+    ? args.attendeeEmails.flatMap((email): string[] =>
+        typeof email === "string" ? [email.trim().toLowerCase()] : [])
+    : [];
+  if (
+    !subject ||
+    subject.length > MAX_EVENT_SUBJECT_LENGTH ||
+    !isValidISODate(startDate) ||
+    !isValidISODate(endDate) ||
+    !TIME_PATTERN.test(startTime) ||
+    !TIME_PATTERN.test(endTime) ||
+    location.length > MAX_EVENT_LOCATION_LENGTH ||
+    description.length > MAX_EVENT_DESCRIPTION_LENGTH ||
+    attendeeEmails.length > MAX_EVENT_ATTENDEES ||
+    attendeeEmails.some((email) => email.length > 254 || !EMAIL_PATTERN.test(email))
+  ) {
+    return { output: toolResult({ connected: true, error: "Invalid event proposal." }), proposal: null };
+  }
+  const start = localDateTime(startDate, startTime, timeZone);
+  const end = localDateTime(endDate, endTime, timeZone);
+  if (!start || !end || end <= start || end.getTime() - start.getTime() > 86_400_000) {
+    return { output: toolResult({ connected: true, error: "Invalid event time range." }), proposal: null };
+  }
+
+  try {
+    const events = await getCalendarEvents(accessToken, start, end, 200);
+    const availability = calculateAvailability(events, [{ start, end }], 1)[0];
+    const proposal: CalendarEventProposal = {
+      id: randomUUID(),
+      subject,
+      start: start.toISOString(),
+      end: end.toISOString(),
+      timeZone,
+      location,
+      attendeeEmails: [...new Set(attendeeEmails)],
+      description,
+      conflicts: proposalConflicts(availability.conflicts),
+    };
+    return {
+      output: toolResult({
+        connected: true,
+        proposalPrepared: true,
+        proposal,
+        instruction:
+          "The event has not been created. Tell the user to review the separate proposal card and use its Create Event button only if correct.",
+      }),
+      proposal,
+    };
+  } catch {
+    return {
+      output: toolResult({ connected: true, error: "The event proposal could not be checked." }),
+      proposal: null,
+    };
+  }
 }
 
 function availabilityWindows(args: Record<string, unknown>, timeZone: string) {
@@ -678,6 +825,7 @@ export async function POST(request: Request) {
           let responseInput = input;
           let availableTools = MICROSOFT_READ_TOOLS;
           let previousResponseId: string | undefined;
+          let pendingCalendarProposal: CalendarEventProposal | null = null;
 
           for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
             const responseStream = await openai.responses.create({
@@ -707,6 +855,26 @@ export async function POST(request: Request) {
 
             const outputs: OpenAI.Responses.ResponseInputItem.FunctionCallOutput[] = [];
             for (const call of calls) {
+              if (call.name === "prepare_calendar_event") {
+                let argumentsValue: unknown;
+                try {
+                  argumentsValue = JSON.parse(call.arguments);
+                } catch {
+                  argumentsValue = null;
+                }
+                const result = await prepareCalendarEvent(
+                  isRecord(argumentsValue) ? argumentsValue : {},
+                  accessToken,
+                  timeZone,
+                );
+                pendingCalendarProposal = result.proposal;
+                outputs.push({
+                  type: "function_call_output",
+                  call_id: call.call_id,
+                  output: result.output,
+                });
+                continue;
+              }
               outputs.push({
                 type: "function_call_output",
                 call_id: call.call_id,
@@ -719,6 +887,14 @@ export async function POST(request: Request) {
             // Tool data is untrusted. Removing every tool before interpretation
             // prevents email or calendar content from causing another tool call.
             availableTools = [];
+          }
+
+          if (pendingCalendarProposal) {
+            controller.enqueue(
+              encoder.encode(
+                `${CALENDAR_PROPOSAL_CONTROL}${JSON.stringify(pendingCalendarProposal)}`,
+              ),
+            );
           }
 
           controller.close();

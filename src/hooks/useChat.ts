@@ -2,6 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { Conversation } from "@/types/conversation";
+import type {
+  CalendarEventProposal,
+  CalendarProposalConflict,
+} from "@/types/calendarProposal";
 import type { Memory } from "@/types/memory";
 import type { MemorySuggestion } from "@/types/memorySuggestion";
 import type { Message } from "@/types/message";
@@ -12,6 +16,7 @@ const LEGACY_STORAGE_KEY = "jarvis-chat-history";
 const THINKING_MESSAGE = "Thinking...";
 const DEFAULT_TITLE = "New Conversation";
 const MAX_TITLE_LENGTH = 48;
+const CALENDAR_PROPOSAL_CONTROL = "\n\u001eJARVIS_CALENDAR_PROPOSAL:";
 const INITIAL_MESSAGES: Message[] = [
   {
     id: "1",
@@ -51,6 +56,32 @@ function isStoredConversation(value: unknown): value is Conversation {
     typeof conversation.updatedAt === "string" &&
     !Number.isNaN(Date.parse(conversation.updatedAt))
   );
+}
+
+function isCalendarProposalConflict(value: unknown): value is CalendarProposalConflict {
+  if (typeof value !== "object" || value === null) return false;
+  const conflict = value as Record<string, unknown>;
+  return typeof conflict.id === "string" &&
+    typeof conflict.subject === "string" &&
+    typeof conflict.start === "string" &&
+    typeof conflict.end === "string" &&
+    typeof conflict.isAllDay === "boolean";
+}
+
+function isCalendarEventProposal(value: unknown): value is CalendarEventProposal {
+  if (typeof value !== "object" || value === null) return false;
+  const proposal = value as Record<string, unknown>;
+  return typeof proposal.id === "string" &&
+    typeof proposal.subject === "string" &&
+    typeof proposal.start === "string" &&
+    typeof proposal.end === "string" &&
+    typeof proposal.timeZone === "string" &&
+    typeof proposal.location === "string" &&
+    Array.isArray(proposal.attendeeEmails) &&
+    proposal.attendeeEmails.every((email) => typeof email === "string") &&
+    typeof proposal.description === "string" &&
+    Array.isArray(proposal.conflicts) &&
+    proposal.conflicts.every(isCalendarProposalConflict);
 }
 
 function parseStoredArray(
@@ -204,11 +235,19 @@ export function useChat(memories: Memory[] = []) {
   const [memorySuggestions, setMemorySuggestions] = useState<
     MemorySuggestion[]
   >([]);
+  const [calendarProposalState, setCalendarProposalState] = useState<{
+    conversationId: string;
+    proposal: CalendarEventProposal;
+  } | null>(null);
+  const [isCreatingCalendarEvent, setIsCreatingCalendarEvent] = useState(false);
+  const [calendarCreationError, setCalendarCreationError] = useState<string | null>(null);
+  const [calendarCreationSuccess, setCalendarCreationSuccess] = useState<string | null>(null);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(
     null,
   );
   const requestActiveRef = useRef(false);
   const activeStreamingMessageIdRef = useRef<string | null>(null);
+  const calendarCreationActiveRef = useRef(false);
 
   const activeConversation = conversations.find(
     (conversation) => conversation.id === activeConversationId,
@@ -218,6 +257,10 @@ export function useChat(memories: Memory[] = []) {
     memorySuggestions.find(
       (suggestion) => suggestion.conversationId === activeConversationId,
     ) ?? null;
+  const pendingCalendarProposal =
+    calendarProposalState?.conversationId === activeConversationId
+      ? calendarProposalState.proposal
+      : null;
 
   const persistConversationState = (
     nextConversations: Conversation[],
@@ -378,6 +421,11 @@ export function useChat(memories: Memory[] = []) {
     setIsLoading(true);
     setIsThinking(true);
     setError(null);
+    setCalendarProposalState((previous) =>
+      previous?.conversationId === requestConversationId ? null : previous,
+    );
+    setCalendarCreationError(null);
+    setCalendarCreationSuccess(null);
 
     const userMessage: Message = {
       id: crypto.randomUUID(),
@@ -465,6 +513,9 @@ export function useChat(memories: Memory[] = []) {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let assistantText = "";
+      let responseBuffer = "";
+      let proposalPayload = "";
+      let readingProposal = false;
 
       const appendChunk = (chunk: string) => {
         if (!chunk) return;
@@ -479,15 +530,52 @@ export function useChat(memories: Memory[] = []) {
         );
       };
 
+      const processResponseChunk = (chunk: string, isFinal = false) => {
+        if (readingProposal) {
+          proposalPayload += chunk;
+          return;
+        }
+        responseBuffer += chunk;
+        const controlIndex = responseBuffer.indexOf(CALENDAR_PROPOSAL_CONTROL);
+        if (controlIndex >= 0) {
+          appendChunk(responseBuffer.slice(0, controlIndex));
+          proposalPayload = responseBuffer.slice(
+            controlIndex + CALENDAR_PROPOSAL_CONTROL.length,
+          );
+          responseBuffer = "";
+          readingProposal = true;
+          return;
+        }
+        const safeLength = isFinal
+          ? responseBuffer.length
+          : Math.max(0, responseBuffer.length - CALENDAR_PROPOSAL_CONTROL.length + 1);
+        appendChunk(responseBuffer.slice(0, safeLength));
+        responseBuffer = responseBuffer.slice(safeLength);
+      };
+
       while (true) {
         const { done, value } = await reader.read();
 
         if (done) {
-          appendChunk(decoder.decode());
+          processResponseChunk(decoder.decode(), true);
           break;
         }
 
-        appendChunk(decoder.decode(value, { stream: true }));
+        processResponseChunk(decoder.decode(value, { stream: true }));
+      }
+
+      if (readingProposal && proposalPayload) {
+        try {
+          const proposal: unknown = JSON.parse(proposalPayload);
+          if (isCalendarEventProposal(proposal)) {
+            setCalendarProposalState({
+              conversationId: requestConversationId,
+              proposal,
+            });
+          }
+        } catch {
+          // Ignore malformed control data without affecting the chat response.
+        }
       }
 
       if (!assistantText.trim()) {
@@ -510,7 +598,7 @@ export function useChat(memories: Memory[] = []) {
   };
 
   const clearConversation = () => {
-    if (requestActiveRef.current || !activeConversation) return;
+    if (requestActiveRef.current || calendarCreationActiveRef.current || !activeConversation) return;
 
     setConversationMessages(activeConversation.id, []);
     setMemorySuggestions((previous) =>
@@ -519,10 +607,15 @@ export function useChat(memories: Memory[] = []) {
       ),
     );
     setError(null);
+    setCalendarProposalState((previous) =>
+      previous?.conversationId === activeConversation.id ? null : previous,
+    );
+    setCalendarCreationError(null);
+    setCalendarCreationSuccess(null);
   };
 
   const createNewConversation = () => {
-    if (requestActiveRef.current) return;
+    if (requestActiveRef.current || calendarCreationActiveRef.current) return;
 
     const conversation = createConversation([]);
     const nextConversations = [conversation, ...conversations];
@@ -530,12 +623,15 @@ export function useChat(memories: Memory[] = []) {
     setConversations(nextConversations);
     setActiveConversationId(conversation.id);
     setError(null);
+    setCalendarCreationError(null);
+    setCalendarCreationSuccess(null);
     persistConversationState(nextConversations, conversation.id);
   };
 
   const switchConversation = (id: string) => {
     if (
       requestActiveRef.current ||
+      calendarCreationActiveRef.current ||
       id === activeConversationId ||
       !conversations.some((conversation) => conversation.id === id)
     ) {
@@ -544,6 +640,8 @@ export function useChat(memories: Memory[] = []) {
 
     setActiveConversationId(id);
     setError(null);
+    setCalendarCreationError(null);
+    setCalendarCreationSuccess(null);
 
     try {
       localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, id);
@@ -557,6 +655,7 @@ export function useChat(memories: Memory[] = []) {
 
     if (
       requestActiveRef.current ||
+      calendarCreationActiveRef.current ||
       !trimmedTitle ||
       !conversations.some((conversation) => conversation.id === id) ||
       !activeConversationId
@@ -581,6 +680,7 @@ export function useChat(memories: Memory[] = []) {
   const deleteConversation = (id: string) => {
     if (
       requestActiveRef.current ||
+      calendarCreationActiveRef.current ||
       !conversations.some((conversation) => conversation.id === id)
     ) {
       return;
@@ -607,6 +707,9 @@ export function useChat(memories: Memory[] = []) {
     setMemorySuggestions((previous) =>
       previous.filter((suggestion) => suggestion.conversationId !== id),
     );
+    setCalendarProposalState((previous) =>
+      previous?.conversationId === id ? null : previous,
+    );
     setActiveConversationId(nextActiveConversationId);
     setError(null);
     persistConversationState(nextConversations, nextActiveConversationId);
@@ -616,6 +719,63 @@ export function useChat(memories: Memory[] = []) {
     setMemorySuggestions((previous) =>
       previous.filter((suggestion) => suggestion.id !== id),
     );
+  };
+
+  const cancelCalendarProposal = () => {
+    if (calendarCreationActiveRef.current) return;
+    setCalendarProposalState(null);
+    setCalendarCreationError(null);
+  };
+
+  const createCalendarEvent = async () => {
+    if (!pendingCalendarProposal || calendarCreationActiveRef.current) return;
+    calendarCreationActiveRef.current = true;
+    setIsCreatingCalendarEvent(true);
+    setCalendarCreationError(null);
+    setCalendarCreationSuccess(null);
+    try {
+      const response = await fetch("/api/calendar/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ proposal: pendingCalendarProposal }),
+      });
+      const body: unknown = await response.json();
+      if (
+        response.status === 409 &&
+        typeof body === "object" &&
+        body !== null &&
+        "conflicts" in body &&
+        Array.isArray(body.conflicts) &&
+        body.conflicts.every(isCalendarProposalConflict)
+      ) {
+        const updatedConflicts = body.conflicts as CalendarProposalConflict[];
+        setCalendarProposalState((previous) => previous ? {
+          ...previous,
+          proposal: { ...previous.proposal, conflicts: updatedConflicts },
+        } : previous);
+        setCalendarCreationError(
+          "Your calendar changed. Review the updated conflicts, then click Create Event again if you still want to proceed.",
+        );
+        return;
+      }
+      if (!response.ok) {
+        const permissionRequired = typeof body === "object" && body !== null &&
+          "code" in body && body.code === "calendar_write_permission_required";
+        throw new Error(permissionRequired ? "permission" : "creation");
+      }
+
+      setCalendarProposalState(null);
+      setCalendarCreationSuccess("Calendar event created successfully.");
+    } catch (creationError: unknown) {
+      setCalendarCreationError(
+        creationError instanceof Error && creationError.message === "permission"
+          ? "Microsoft needs delegated Calendars.ReadWrite permission. Reconnect Microsoft after granting it."
+          : "The calendar event could not be created. Your proposal was preserved.",
+      );
+    } finally {
+      calendarCreationActiveRef.current = false;
+      setIsCreatingCalendarEvent(false);
+    }
   };
 
   return {
@@ -635,5 +795,11 @@ export function useChat(memories: Memory[] = []) {
     deleteConversation,
     pendingMemorySuggestion,
     dismissMemorySuggestion,
+    pendingCalendarProposal,
+    isCreatingCalendarEvent,
+    calendarCreationError,
+    calendarCreationSuccess,
+    createCalendarEvent,
+    cancelCalendarProposal,
   };
 }
