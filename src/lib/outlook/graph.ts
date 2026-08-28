@@ -121,8 +121,8 @@ export async function getCalendarEvents(
   const query = new URLSearchParams({
     startDateTime: start.toISOString(),
     endDateTime: end.toISOString(),
-    "$top": String(Math.min(Math.max(limit, 1), 50)),
-    "$select": "id,subject,start,end,location,organizer,attendees,isAllDay",
+    "$top": String(Math.min(Math.max(limit, 1), 200)),
+    "$select": "id,subject,start,end,location,organizer,attendees,isAllDay,isCancelled,showAs",
     "$orderby": "start/dateTime",
   });
   const response = await fetch(
@@ -188,6 +188,8 @@ export async function getCalendarEvents(
           }).slice(0, 100)
         : [],
       isAllDay: event.isAllDay,
+      isCancelled: event.isCancelled === true,
+      showAs: typeof event.showAs === "string" ? event.showAs : "busy",
     }];
   });
 }

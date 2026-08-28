@@ -22,4 +22,6 @@ export interface CalendarEvent {
   organizer: CalendarParticipant;
   attendees: CalendarAttendee[];
   isAllDay: boolean;
+  isCancelled: boolean;
+  showAs: string;
 }
